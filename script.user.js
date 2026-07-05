@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NodeBB - אימוג'י מובנה של הדפדפן (עם הסרת כפילויות)
 // @namespace    tsoolgee
-// @version      0.0.1
-// @description  פועל אוטומטית בכל פורום מבוסס NodeBB. תמיד מציג אימוג'ים באמצעות הפונט המובנה של המערכת (ולא מתמונה מהרשת), ומזהה ומסיר כפילויות שנגרמות מבאג ידוע בפלאגין (אותו אימוג'י מוצג פעמיים - עותק שבור לצד עותק תקין) - בלי לפגוע באימוג'ים זהים שהוקלדו בכוונה פעמיים ברצף.
+// @version      0.0.2
+// @description  פועל אוטומטית בכל פורום מבוסס NodeBB. תמיד מציג אימוג'ים באמצעות הפונט המובנה של המערכת (ולא מתמונה מהרשת), ומזהה ומסיר כפילויות שנגרמות מבאג ידוע בפלאגין (אותו אימוג'י מוצג פעמיים - עותק שבור לצד עותק תקין) - בלי לפגוע באימוג'ים זהים שהוקלדו בכוונה פעמיים ברצף. תומך גם באימוג'ים בתפריט בחירה שנטענים ב-lazy load (data-src).
 // @author       צול-גאה
 // @match        *://*/*
 // @grant        none
@@ -21,7 +21,7 @@
         if (document.querySelector('meta[name="generator"][content*="NodeBB" i]')) return true;
         if (window.config && typeof window.config.relative_path !== 'undefined') return true;
         if (document.querySelector('script[src*="nodebb-plugin-emoji"], link[href*="nodebb-plugin-emoji"]')) return true;
-        if (document.querySelector(`img[src*="${EMOJI_PATH}"]`)) return true;
+        if (document.querySelector(`img[src*="${EMOJI_PATH}"], img[data-src*="${EMOJI_PATH}"]`)) return true;
         if (document.body && (document.body.hasAttribute('data-nodebb') || document.querySelector('[data-nodebb-loaded]'))) return true;
         return false;
     }
@@ -34,7 +34,7 @@
     function injectHidingCSS() {
         if (styleEl) return;
         styleEl = document.createElement('style');
-        styleEl.textContent = `img[src*="${EMOJI_PATH}"] { visibility: hidden !important; }`;
+        styleEl.textContent = `img[src*="${EMOJI_PATH}"], img[data-src*="${EMOJI_PATH}"] { visibility: hidden !important; }`;
         (document.head || document.documentElement).appendChild(styleEl);
     }
     injectHidingCSS();
@@ -50,8 +50,17 @@
         }
     }
 
+    // מחזיר את כתובת התמונה של אימוג'י הפורום, בין אם היא ב-src ובין אם ב-data-src
+    // (בתפריטי בחירת אימוג'י התמונות בדרך כלל בטעינה עצלה - יש רק data-src, בלי src בכלל)
+    function getForumEmojiUrl(img) {
+        const dataSrc = img.getAttribute('data-src');
+        if (dataSrc && dataSrc.includes(EMOJI_PATH)) return dataSrc;
+        if (img.src && img.src.includes(EMOJI_PATH)) return img.src;
+        return null;
+    }
+
     function isForumEmojiImg(img) {
-        return img.src && img.src.includes(EMOJI_PATH);
+        return !!getForumEmojiUrl(img);
     }
 
     // .../emoji/apple/2705.png?v=xxx  ->  2705
@@ -75,17 +84,22 @@
     let pendingChecks = [];
 
     function replaceEmojiImg(img) {
-        if (!isForumEmojiImg(img) || img.dataset.emojiReplaced) return;
+        if (img.dataset.emojiReplaced) return;
+        const originalSrc = getForumEmojiUrl(img);
+        if (!originalSrc) return;
         img.dataset.emojiReplaced = '1';
 
-        const code = extractCodeFromSrc(img.src);
+        const code = extractCodeFromSrc(originalSrc);
         if (!code) return;
 
-        const originalSrc = img.src;
         const emojiChar = codepointsToEmoji(code);
 
-        // מנתקים מיידית את התמונה מהמקור - עוצר המשך הורדה מהרשת ומונע כל הבהוב
+        // מנתקים מיידית את התמונה מהמקור - גם src (אם קיים) וגם data-src.
+        // חשוב להסיר גם data-src, אחרת ספריית הטעינה העצלה (lazy load) של הפורום
+        // עלולה עדיין להעתיק אותו ל-src מאוחר יותר ולגרום להורדה מיותרת מהרשת,
+        // ולפעמים אף לגרום להבהוב של התמונה השבורה/המקורית לפני ההחלפה.
         img.removeAttribute('src');
+        img.removeAttribute('data-src');
 
         let node = img;
         if (emojiChar) {
@@ -169,10 +183,22 @@
         scanNode(document.body);
         const observer = new MutationObserver(mutations => {
             for (const m of mutations) {
-                m.addedNodes.forEach(scanNode);
+                if (m.type === 'childList') {
+                    m.addedNodes.forEach(scanNode);
+                } else if (m.type === 'attributes' && m.target && m.target.tagName === 'IMG') {
+                    // תופס מקרה קצה: ספריית טעינה עצלה של הפורום הספיקה להוסיף/לשנות
+                    // data-src או src לפני שהספקנו להחליף את התמונה
+                    replaceEmojiImg(m.target);
+                    scheduleDedupe();
+                }
             }
         });
-        observer.observe(document.body, { childList: true, subtree: true });
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'data-src']
+        });
     }
 
     if (document.body) {
